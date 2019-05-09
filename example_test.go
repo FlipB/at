@@ -1,23 +1,35 @@
-# at
+package at_test
 
-Package for dealing with AT devices / data streams.
+import (
+	"context"
+	"fmt"
+	"io"
+	"time"
 
-PR's welcome.
+	"github.com/flipb/at"
+)
 
-## Go generate dependencies
+func openATDevice() io.ReadWriter {
+	fakeDevice := at.NewTestReadWriter()
 
-`stringer` from https://github.com/golang/tools/blob/master/cmd/stringer/stringer.go is used.
+	// dont return error when we write to the fake device
+	fakeDevice.WithWriteResult(nil)
 
+	// dont return errors, return these strings when we read from the device
+	// first read
+	fakeDevice.WithReadResult([]byte("AT\r\n"), nil)
+	// second read
+	fakeDevice.WithReadResult([]byte("OK\r\n"), nil)
+	// second third
+	fakeDevice.WithReadResult([]byte("ATE0\r\n"), nil)
 
-# AT
+	return fakeDevice
+}
 
-`AT` is a struct for wrapping AT devices to provide a nice, simple API to send AT commands.
-
-## Example
-
-```go
+func ExampleNewAT() {
 
 	ctx := context.Background()
+
 	var rawDevice io.ReadWriter = openATDevice()
 
 	// create AT - note that specifying the DeviceProfile is optional
@@ -44,25 +56,16 @@ PR's welcome.
 
 	// Print the response
 	println(response)
-	// NOTE: because we sent the "AT" command, response here *should* be an empty string.
-	// This is because command echoes, "OK" and error strings are stripped from the response.
-	// Error strings are instead put in the err return value.
-	// OK is inferred from the lack of errors.
-	// And Echoes are removed so as to not get mixed up with "real" command outputs
+	// NOTE: response here should be an empty string
+	// this is because command echoes, "OK" and error strings are stripped from the response.
+	// error strings are instead put in the err return value
 
 	// so, again, response is empty for AT commands that don't output anything (other than potential command echo and OK)
+}
 
-```
-
-# at.ScanWriter
-
-`ScanWriter` wraps an AT device to infer the device state.
-`ScanWriter` can tell you if the received "token" is an AT command echo, or and AT error, or an interactive prompt.
-
-## Example
-
-```go
+func ExampleNewScanwriter() {
 	ctx := context.Background()
+
 	var rawDevice io.ReadWriter = openATDevice()
 
 	// create a scanwriter over an io.ReadWriter
@@ -75,46 +78,71 @@ PR's welcome.
 		panic("unexpected state")
 	}
 
+	scanContext, cancelFn := context.WithTimeout(ctx, time.Second*10)
+	defer cancelFn()
+
+	// in order to update scanwriter's state we have to either Scan or Write.
+	// Scan will block until there's enough output from the device, or until context is cancelled.
+	ok := scanwriter.Scan(scanContext)
+	// we expect "ok" to be false in this case as no output should have been written
+	// Scan only returned because the context timed out
+	if !ok {
+		// let's confirm our theory
+		err := scanwriter.Err()
+		switch err {
+		case context.DeadlineExceeded:
+			// well this was expected!
+		default:
+			panic("unexpected error")
+		}
+	} else {
+		panic("unexpected scan result")
+	}
+
 	// write a command to the AT device
 	err := scanwriter.Write([]byte("AT\r\n"))
 	if err != nil {
 		panic("error writing to scanwriter")
 	}
 
+	states := 0
 	// scan in a loop
 	for scanwriter.Scan(ctx) {
 		state := scanwriter.State()
 		switch state {
 		// We expect the first output after sending out command to be an Echo
 		case at.ATEcho:
+			states++
 			continue
 		case at.ATData:
 			// we got data - this is unexpected for the AT command
 			// AT normally only returns an echo (ATEcho) and an OK (ATReady)
 
-			// get the data
+			// to get the data returned
 			data := scanwriter.Bytes()
 			println(data)
+
+			// String is the same as Bytes, only with a type conversion built in.
+			_ = scanwriter.String()
+
 			continue
 		case at.ATError:
 			// ATError means the command failed and returned an error
 
-			// we can get the error
+			// lets see the error
 			err = scanwriter.Err()
-			// as well as any data returned before the error occurred
-			data := scanwriter.Bytes()
+			fmt.Printf("error in AT command: %v\n", err)
 
-			fmt.Printf("error in AT command: %v\nData: %s\n", err, data)
+			// let's also inspect if the AT command returned any data before the error occurred
+			data := scanwriter.Bytes()
+			fmt.Printf("AT command output: %s", data)
+
 			break
+
 		case at.ATNotice:
 			// notice is very unexpected here - normally only sent on the Notification port on my device.
 			// An ATNotice is a notification pushed from the network, ie. ^BOOT, RING, etc.
 			// ATNotice and ATData classification might get be mixed up.
-			
-			// we can inspect the data received
-			data := scanwriter.Byte()
-			println(data)
-			continue
 		case at.ATReady:
 			// we got an "OK" - command finished successfully
 			println("Command completed successfully!")
@@ -125,4 +153,5 @@ PR's welcome.
 	if err != nil {
 		panic("error scanning")
 	}
-```
+
+}
