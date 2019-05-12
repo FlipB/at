@@ -14,7 +14,8 @@ func PatternIndex(pattern []byte, buf []byte, bufs ...[]byte) int {
 			currentIndex++
 			if pattern[pIndex] != b[bIndex] {
 				pIndex = 0
-			} else {
+			}
+			if pattern[pIndex] == b[bIndex] {
 				pIndex++
 			}
 			if pIndex == len(pattern) {

@@ -40,9 +40,10 @@ func (p DefaultProfile) InferState(readData []byte, lastCmd []byte, outputCountC
 
 var _ DeviceHooks = DefaultProfile{}
 
-func (p DefaultProfile) RawOutput(readData []byte) []byte {
-	return readData
+func (p DefaultProfile) OutputTokenizer(readData []byte) (advance int, token []byte, matched bool) {
+	return 0, readData, false
 }
+
 func (p DefaultProfile) Output(readData []byte, lastCmd []byte, outputCountCmd int) []byte {
 	return readData
 }

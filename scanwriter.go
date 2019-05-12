@@ -9,8 +9,6 @@ import (
 	"io"
 	"log"
 	"time"
-
-	"github.com/flipb/at/multibuf"
 )
 
 // Uses stringer from golang.org/x/tools/cmd/stringer
@@ -59,9 +57,10 @@ type DeviceProfile interface {
 
 // DeviceHooks allow DeviceProfiles to fix quirks in the device by modifying input and output directly
 type DeviceHooks interface {
-	// RawOutput is run before any processing.
-	// Fairly untested code
-	RawOutput(deviceOutputData []byte) []byte
+	// OutputTokenizer is an additional tokenizer that is sent output from device
+	// it returns the advance count (how many bytes to consume from deviceOutputData),
+	// a token (essentially an output line) and true if deviceOutputData contains a full token.
+	OutputTokenizer(deviceOutputData []byte) (advance int, token []byte, matched bool)
 	// Output allows device profile to fix quirks in the device's output
 	Output(deviceOutputData []byte, lastCmd []byte, outputCountSinceCmd int) (filteredData []byte)
 	// Input allows device profile to fix quirks in the device's input handling
@@ -134,42 +133,19 @@ func (d *ScanWriter) newScanner(initialBuffer []byte) {
 
 func makeSplitter(buf []byte, eolSeq, promptSeq []byte, hooks DeviceHooks) bufio.SplitFunc {
 
-	patternMatchAdvance := func(pattern, inputData []byte) (matched bool, advance int, data []byte) {
-		if i := multibuf.PatternIndex(pattern, buf, inputData); i >= 0 {
-			advance = i + len(pattern)
-			data := multibuf.Slice(0, advance, buf, inputData)
-
-			// at this stage we have to remove any bytes taken from "buf"
-			// as well as decrease the advance count with the same number of bytes
-			if len(buf) > 0 && len(data) > 0 {
-				consumed := len(buf)
-				if len(buf) > len(data) {
-					consumed = len(data)
-				}
-				buf = buf[consumed:]
-
-				advance -= consumed
-				if advance < 0 {
-					advance = 0
-				}
-			}
-			return true, advance, data
-		}
-		return false, 0, inputData
-	}
-
 	return func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		if atEOF && len(data) == 0 {
 			return 0, nil, nil
 		}
 		if hooks != nil {
-			data = hooks.RawOutput(data)
+			if advance, token, match := matchAdvanceBuffer(&buf, data, tokenizerToTwoBuffers(hooks.OutputTokenizer)); match {
+				return advance, token, nil
+			}
 		}
-
-		if ok, advance, token := patternMatchAdvance(eolSeq, data); ok {
+		if advance, token, match := matchAdvanceBuffer(&buf, data, PatternSplitTokenizer(eolSeq)); match {
 			return advance, token, nil
 		}
-		if ok, advance, token := patternMatchAdvance(promptSeq, data); ok {
+		if advance, token, match := matchAdvanceBuffer(&buf, data, PatternSplitTokenizer(promptSeq)); match {
 			return advance, token, nil
 		}
 		if atEOF {
@@ -185,22 +161,25 @@ func makeSplitter(buf []byte, eolSeq, promptSeq []byte, hooks DeviceHooks) bufio
 // Even on errors data can be set.
 func (d ScanWriter) Bytes() []byte {
 	// data/token/line received
-	if d.err == nil && d.State() == ATError {
-		return nil
-	}
+	// TODO figure out if we need to change this behaviour.
+	// which is least astonishing, the fact that bytes returns bytes on an error,
+	// or that bytes doesnt always return the received bytes?
+	//if d.err == nil && d.State() == ATError {
+	//	return nil
+	//}
 	return d.current
 }
 
 // String returns the data read from device during the previous call to Next as a string, unless an error occurred.
 func (d ScanWriter) String() string {
 	// data/token/line received
-	return string(d.current)
+	return string(d.Bytes())
 }
 
 // Err returns the error that occured during the call to Next or nil if no error occured
 func (d ScanWriter) Err() error {
 	if d.err == nil && d.State() == ATError {
-		return errors.New(d.String())
+		return errors.New(string(d.current))
 	}
 	return d.err
 }

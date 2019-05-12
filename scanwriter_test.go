@@ -43,6 +43,7 @@ func TestScanWriter_Sequences(t *testing.T) {
 		fields       fields
 		testSequence []inputWithExpectedOutput
 	}{
+
 		{
 			name: "default state is ATReady",
 			fields: fields{
@@ -132,11 +133,12 @@ func TestScanWriter_Sequences(t *testing.T) {
 				},
 				{
 					wantState: ATError,
-					wantData:  "COMMAND NOT SUPPORT\r\n",
+					wantData:  "ERROR: COMMAND NOT SUPPORT\r\n",
 					wantError: true,
 				},
 			},
 		},
+
 		{
 			name: "device read errors propagate",
 			fields: fields{
@@ -167,6 +169,110 @@ func TestScanWriter_Sequences(t *testing.T) {
 				},
 			},
 		},
+
+		{
+			name: "test AT error condition",
+			fields: fields{
+				device: NewTestReadWriter().
+					WithWriteResult(nil),
+			},
+			testSequence: []inputWithExpectedOutput{
+				{
+					input: "AT+CNUM\r\n",
+					output: [][]byte{
+						[]byte("AT+CNUM\r\n"),
+						[]byte(`+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n"),
+					},
+					ignoreState:     false,
+					ignoreData:      true,
+					wantScanFailure: false,
+					wantError:       false,
+					wantState:       ATEcho,
+				},
+				{
+					wantError:  true,
+					wantState:  ATError,
+					wantData:   `+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n",
+					ignoreData: false,
+				},
+			},
+		},
+		{
+			name: "test that Bytes always returns the raw bytes read",
+			fields: fields{
+				device: NewTestReadWriter().
+					WithWriteResult(nil),
+			},
+			testSequence: []inputWithExpectedOutput{
+				{
+					input: "AT+CNUM\r\n",
+					output: [][]byte{
+						[]byte("AT+CNUM\r\n"),
+						[]byte(`+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n"),
+					},
+					ignoreState:     false,
+					ignoreData:      true,
+					wantScanFailure: false,
+					wantError:       false,
+					wantState:       ATEcho,
+					wantData:        "AT+CNUM\r\n",
+				},
+				{
+					wantError: true,
+					wantState: ATError,
+					wantData:  `+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n",
+				},
+				{
+					input: "AT\r\n",
+					output: [][]byte{
+						[]byte("AT\r\n"),
+						[]byte(`OK` + "\r\n"),
+					},
+					ignoreState:     false,
+					ignoreData:      true,
+					wantScanFailure: false,
+					wantError:       false,
+					wantState:       ATEcho,
+					wantData:        "AT\r\n",
+				},
+				{
+					wantError: false,
+					wantState: ATReady,
+					wantData:  `OK` + "\r\n",
+				},
+			},
+		},
+
+		// Need to add a test profile to run this
+		// {
+		// 	name: "test device with inconsistent EOLs on Echoes",
+		// 	fields: fields{
+		// 		device: NewTestReadWriter().
+		// 			WithWriteResult(nil),
+		// 	},
+		// 	testSequence: []inputWithExpectedOutput{
+		// 		{
+		// 			input: "AT+CNUM\r\n",
+		// 			output: [][]byte{
+		// 				[]byte("AT+CNUM\r\r\n"),
+		// 				[]byte(`+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n"),
+		// 				[]byte(`AT` + "\r\n"),
+		// 				[]byte(`OK` + "\r\n"),
+		// 			},
+		// 			ignoreState:     false,
+		// 			ignoreData:      true,
+		// 			wantScanFailure: false,
+		// 			wantError:       false,
+		// 			wantState:       ATEcho,
+		// 		},
+		// 		{
+		// 			wantError:  true,
+		// 			wantState:  ATError,
+		// 			wantData:   `+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n",
+		// 			ignoreData: false,
+		// 		},
+		// 	},
+		// },
 	}
 	for i := range tests {
 		tt := tests[i]
@@ -208,16 +314,19 @@ func TestScanWriter_Sequences(t *testing.T) {
 						t.Errorf("Part %d: ScanWriter.Scan() = %v, want %v", i, scanOk, !ts.wantScanFailure)
 					}
 				}
+				if string(sw.Bytes()) != sw.String() {
+					panic("Bytes() and String() not in sync")
+				}
 
 				if gotState := sw.State(); !ts.ignoreState && gotState != ts.wantState {
 					t.Errorf("Part %d: ScanWriter.State() = %v, want %v", i, gotState, ts.wantState)
 				}
 
-				if gotString := sw.String(); !ts.ignoreData && string(sw.Bytes()) == gotString && gotString != ts.wantData {
+				if gotString := sw.String(); !ts.ignoreData && gotString != ts.wantData {
 					t.Errorf("Part %d: ScanWriter.Bytes() = %v, want %v", i, gotString, ts.wantData)
 				}
 
-				if gotError := sw.Err(); !ts.wantError && gotError != nil {
+				if gotError := sw.Err(); (!ts.wantError && gotError != nil) || (ts.wantError && gotError == nil) {
 					t.Errorf("Part %d: ScanWriter.Err() = %v, wantError %v", i, gotError, ts.wantError)
 				}
 

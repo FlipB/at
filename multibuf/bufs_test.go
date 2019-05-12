@@ -213,7 +213,7 @@ func Test_bufsPatternIndex(t *testing.T) {
 			want: 27,
 		},
 		{
-			name: "match acros buffer boundary",
+			name: "match across buffer boundary",
 			args: args{
 				pattern: []byte("dleswe"),
 				buf:     []byte("haystack"),
@@ -224,12 +224,20 @@ func Test_bufsPatternIndex(t *testing.T) {
 			},
 			want: 17,
 		},
+		{
+			name: "can match immediately after failure (CRCRLF)",
+			args: args{
+				pattern: []byte("\r\n"),
+				buf:     nil,
+				bufs: [][]byte{
+					[]byte("test\r\r\n"),
+				},
+			},
+			want: 5,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if "match buf2 middle" == tt.name {
-				println("breakpoint")
-			}
 			if got := PatternIndex(tt.args.pattern, tt.args.buf, tt.args.bufs...); got != tt.want {
 				t.Errorf("bufsPatternIndex() = %v, want %v", got, tt.want)
 			}
