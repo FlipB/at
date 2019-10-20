@@ -4,6 +4,18 @@ package at
 
 import "strconv"
 
+func _() {
+	// An "invalid array index" compiler error signifies that the constant values have changed.
+	// Re-run the stringer command to generate them again.
+	var x [1]struct{}
+	_ = x[ATReady-0]
+	_ = x[ATError-1]
+	_ = x[ATData-2]
+	_ = x[ATPrompt-3]
+	_ = x[ATEcho-4]
+	_ = x[ATNotice-5]
+}
+
 const _State_name = "ATReadyATErrorATDataATPromptATEchoATNotice"
 
 var _State_index = [...]uint8{0, 7, 14, 20, 28, 34, 42}
