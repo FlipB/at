@@ -14,18 +14,6 @@ import (
 // Uses stringer from golang.org/x/tools/cmd/stringer
 //go:generate stringer -type=State
 
-/*
-
-
-
-// TODO check splitter code - how do we make sure we're not in the middle of the buffer when we split?
-We should ensure we're at the LAST WRITTEN BYTE
-// I wrote this too long ago and cannot remember why this is significant.
-
-
-
-*/
-
 // State is an enum to classify AT device output
 type State int
 

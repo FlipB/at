@@ -8,6 +8,9 @@ PR's welcome.
 
 `stringer` from https://github.com/golang/tools/blob/master/cmd/stringer/stringer.go is used.
 
+These dependencies are added to `tools.go` and included in `go.mod` - to install correct versions you can use `go mod vendor`, and then use `go run ./vendor/golang.org/x/tools/cmd/stringer`.
+
+Invoking `go generate` requires `stringer` on the path, however.
 
 # AT
 
