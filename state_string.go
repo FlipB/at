@@ -10,15 +10,15 @@ func _() {
 	var x [1]struct{}
 	_ = x[ATReady-0]
 	_ = x[ATError-1]
-	_ = x[ATData-2]
-	_ = x[ATPrompt-3]
-	_ = x[ATEcho-4]
-	_ = x[ATNotice-5]
+	_ = x[ATNotice-2]
+	_ = x[ATData-3]
+	_ = x[ATPrompt-4]
+	_ = x[ATEcho-5]
 }
 
-const _State_name = "ATReadyATErrorATDataATPromptATEchoATNotice"
+const _State_name = "ATReadyATErrorATNoticeATDataATPromptATEcho"
 
-var _State_index = [...]uint8{0, 7, 14, 20, 28, 34, 42}
+var _State_index = [...]uint8{0, 7, 14, 22, 28, 36, 42}
 
 func (i State) String() string {
 	if i < 0 || i >= State(len(_State_index)-1) {

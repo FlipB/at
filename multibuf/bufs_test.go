@@ -334,7 +334,7 @@ func Test_bufsSlice(t *testing.T) {
 			args: args{
 				buf: []byte("000b"),
 				bufs: [][]byte{
-					[]byte("c1111"),
+					[]byte("c2111"),
 				},
 				index:     6,
 				uptoIndex: 9,

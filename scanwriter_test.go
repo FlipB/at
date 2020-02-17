@@ -3,53 +3,265 @@ package at
 import (
 	"context"
 	"fmt"
-	"io"
 	"testing"
+	"time"
 )
 
-func TestScanWriter_Sequences(t *testing.T) {
-	type fields struct {
-		device        io.ReadWriter
-		deviceProfile DeviceProfile
-		current       []byte
-		err           error
-		cmd           []byte
-		outputCount   int
-		cmdActive     bool
+func timeoutCtx(t time.Duration) func() context.Context {
+	return func() context.Context {
+		ctx, _ := context.WithTimeout(context.Background(), t)
+		return ctx
 	}
-	type inputWithExpectedOutput struct {
-		ctx context.Context
+}
 
+func TestScanWriter_FakeDevice(t *testing.T) {
+	type fields struct {
+		deviceEmu        func(writes <-chan WriteRequest, reads <-chan ReadRequest) error
+		deviceProfile    DeviceProfile
+		current          []byte        // internal state of scanWriter
+		err              error         // internal error of scanWriter
+		cmd              []byte        // name of the last command sent on the scanWriter
+		outputCount      int           // number of lines of output read since sending the last command
+		cmdActive        bool          // wether the last sent command has been determined to have finished
+		unblockThreshold time.Duration // time before additional unblocks are sent in clearReader
+	}
+	type writeAndScanParams struct {
+		// Write
+		ctxFactory     func() context.Context
 		input          string
 		wantInputError bool
 
-		// output to be appended to the test devices output buffer
-		// note that nil []byte are converted to errors (so use empty []byte slices for empty outputs)
-		output [][]byte
-
+		// Scan
 		skipScan        bool
 		wantScanFailure bool
-
-		wantState State
-		// ignoreState means we don't care about the resulting state
-		ignoreState bool
-		wantData    string
-		// ignoreData means we don't care about the response data sent
-		ignoreData bool
-		wantError  bool
+		wantState       State
+		ignoreState     bool // ignoreState means we don't care about the resulting state
+		wantData        string
+		ignoreData      bool // ignoreData means we don't care about the response data sent
+		wantError       bool
 	}
 	tests := []struct {
 		name         string
 		fields       fields
-		testSequence []inputWithExpectedOutput
+		testSequence []writeAndScanParams
 	}{
+		{
+			name: "AT_UNBLOCK is sent when context expires during scan",
+			fields: fields{
+				deviceEmu: func(writes <-chan WriteRequest, reads <-chan ReadRequest) error {
+					wreq := <-writes                 // Assume AT was written
+					wreq.Response <- WriteResponse{} // signal write as OK
 
+					rreq := <-reads // Test proceeds to Scan which triggers a Read
+					// Block read until we get the AT_UNBLOCK
+
+					wreq2 := <-writes                         // Assume AT_UNBLOCK was written
+					wreq2.Response <- WriteResponse{Err: nil} // signal write as OK
+
+					rreq.Response <- ReadResponse{OutData: []byte("AT_UNBLOCK0\r\nCOMMAND NOT SUPPORT\r\n")} // Fake device echo and output
+
+					return nil
+				},
+			},
+			testSequence: []writeAndScanParams{
+				{
+					ctxFactory:      timeoutCtx(time.Millisecond),
+					input:           "AT\r\n",
+					ignoreState:     true,
+					ignoreData:      true,
+					wantScanFailure: true,
+					wantError:       true,
+					wantState:       ATEcho,
+					wantData:        "AT+CNUM\r\n",
+				},
+			},
+		},
+		{
+			name: "AT_UNBLOCK with ATE0",
+			fields: fields{
+				deviceEmu: func(writes <-chan WriteRequest, reads <-chan ReadRequest) error {
+					wreq := <-writes                 // Assume ATE0 was written
+					wreq.Response <- WriteResponse{} // signal write as OK
+
+					rreq := <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("OK\r\n")}
+
+					wreq = <-writes                          // Assume a command was written
+					wreq.Response <- WriteResponse{Err: nil} // signal write as OK
+
+					rreq = <-reads // block on scan for the written command
+
+					wreq = <-writes                          // Assume AT_UNBLOCK0 was written
+					wreq.Response <- WriteResponse{Err: nil} // signal write as OK
+
+					// send AT_UNBLOCK response without echo
+					rreq.Response <- ReadResponse{OutData: []byte("COMMAND NOT SUPPORT\r\n")}
+
+					wreq = <-writes                          // Assume AT_UNBLOCK1 was written
+					wreq.Response <- WriteResponse{Err: nil} // signal write as OK
+
+					// send AT_UNBLOCK response without echo
+					rreq = <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("COMMAND NOT SUPPORT\r\n")}
+
+					wreq = <-writes                          // Assume AT_UNBLOCK2 was written
+					wreq.Response <- WriteResponse{Err: nil} // signal write as OK
+
+					// send AT_UNBLOCK response without echo
+					rreq = <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("COMMAND NOT SUPPORT\r\n")}
+
+					return nil
+				},
+			},
+			testSequence: []writeAndScanParams{
+				{
+					input:     "ATE0\r\n",
+					wantState: ATReady,
+					wantData:  "OK\r\n",
+				},
+				{
+					ctxFactory:      timeoutCtx(time.Millisecond),
+					input:           "AT\r\n",
+					ignoreState:     true,
+					ignoreData:      true,
+					wantScanFailure: true,
+					wantError:       true,
+				},
+			},
+		},
+		{
+			name: "AT_UNBLOCK with staggered output",
+			fields: fields{
+				deviceEmu: func(writes <-chan WriteRequest, reads <-chan ReadRequest) error {
+					wreq := <-writes                 // Assume AT was written
+					wreq.Response <- WriteResponse{} // signal write as OK
+
+					rreq := <-reads // Test proceeds to Scan which triggers a Read
+					// Block read until we get the AT_UNBLOCK
+
+					wreq2 := <-writes                         // Assume AT_UNBLOCK was written
+					wreq2.Response <- WriteResponse{Err: nil} // signal write as OK
+
+					rreq.Response <- ReadResponse{OutData: []byte("AT_UNB")}
+					rreq = <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("LOCK0\r\nCOMMAND NOT SUPPORT\r\n")}
+
+					return nil
+				},
+			},
+			testSequence: []writeAndScanParams{
+				{
+					ctxFactory:      timeoutCtx(time.Millisecond),
+					input:           "AT\r\n",
+					ignoreState:     true,
+					ignoreData:      true,
+					wantScanFailure: true,
+					wantError:       true,
+					wantState:       ATEcho,
+					wantData:        "AT+CNUM\r\n",
+				},
+			},
+		},
+		{
+			name: "AT_UNBLOCK0 response gets eaten",
+			fields: fields{
+				deviceEmu: func(writes <-chan WriteRequest, reads <-chan ReadRequest) error {
+					wreq := <-writes // Assume ATD123123131231 was written
+					orgCmd := string(wreq.InData)
+					wreq.Response <- WriteResponse{} // signal write as OK
+
+					rreq := <-reads // Test proceeds to Scan which triggers a Read
+					// Block read until we get the AT_UNBLOCK
+
+					wreq = <-writes                          // Assume AT_UNBLOCK was written
+					wreq.Response <- WriteResponse{Err: nil} // signal write as OK
+
+					// send original command echo and OK instead of AT_UNBLOCK
+					rreq.Response <- ReadResponse{OutData: []byte(orgCmd + "OK\r\n")}
+
+					// now our cleanup routine should be stuck waiting for AT_UNBLOCK, which isnt going to arrive.
+					// Then it should send a secondary AT_UNBLOCK
+					wreq = <-writes
+					// wreq.InData // expect AT_UNBLOCK_1
+					if string(wreq.InData) != "AT_UNBLOCK1\r\n" {
+						return fmt.Errorf("expected write to be AT_UNBLOCK1, not '%s'", wreq.InData)
+					}
+					wreq.Response <- WriteResponse{} // ok
+
+					rreq = <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("AT_UNBLOCK1\r\nCOMMAND NOT SUPPORT\r\n")}
+
+					return nil
+				},
+			},
+			testSequence: []writeAndScanParams{
+				{
+					ctxFactory:      timeoutCtx(time.Millisecond),
+					input:           "ATD123213131231\r\n",
+					ignoreState:     true,
+					ignoreData:      true,
+					wantScanFailure: true,
+					wantError:       true,
+					wantState:       ATEcho,
+					wantData:        "OK\r\n",
+				},
+			},
+		},
+		{
+			name: "AT_UNBLOCK with ATE0 get swallowed",
+			fields: fields{
+				deviceEmu: func(writes <-chan WriteRequest, reads <-chan ReadRequest) error {
+					wreq := <-writes // Assume ATD123123131231 was written
+					orgCmd := string(wreq.InData)
+					wreq.Response <- WriteResponse{} // signal write as OK
+
+					rreq := <-reads // Test proceeds to Scan which triggers a Read
+					// Block read until we get the AT_UNBLOCK
+
+					wreq = <-writes                  // Assume AT_UNBLOCK was written
+					wreq.Response <- WriteResponse{} // signal write as OK
+
+					// send original command echo and OK instead of AT_UNBLOCK
+					rreq.Response <- ReadResponse{OutData: []byte(orgCmd + "OK\r\n")}
+
+					// now our cleanup routine should be stuck waiting for AT_UNBLOCK, which isnt going to arrive.
+					// Then it should send a secondary AT_UNBLOCK
+					wreq = <-writes
+					// wreq.InData // expect AT_UNBLOCK_1
+					if string(wreq.InData) != "AT_UNBLOCK1\r\n" {
+						return fmt.Errorf("expected write to be AT_UNBLOCK1, not '%s'", wreq.InData)
+					}
+					wreq.Response <- WriteResponse{} // ok
+
+					rreq = <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("AT_UNBLOCK1\r\nCOMMAND NOT SUPPORT\r\n")}
+
+					return nil
+				},
+			},
+			testSequence: []writeAndScanParams{
+				{
+					ctxFactory:      timeoutCtx(time.Millisecond),
+					input:           "ATD123213131231\r\n",
+					ignoreState:     true,
+					ignoreData:      false,
+					wantScanFailure: true,
+					wantError:       true,
+					wantState:       ATEcho,
+					wantData:        "OK\r\n",
+				},
+			},
+		},
 		{
 			name: "default state is ATReady",
 			fields: fields{
-				device: NewTestReadWriter(),
+				deviceEmu: func(writes <-chan WriteRequest, reads <-chan ReadRequest) error {
+
+					return nil
+				},
 			},
-			testSequence: []inputWithExpectedOutput{
+			testSequence: []writeAndScanParams{
 				{
 					skipScan:    true,
 					wantState:   ATReady,
@@ -58,14 +270,22 @@ func TestScanWriter_Sequences(t *testing.T) {
 			},
 		},
 		{
-			name: "sending AT cycles states",
+			name: "sending AT cycles state",
 			fields: fields{
-				device: NewTestReadWriter().
-					WithWriteResult(nil).
-					WithReadResult([]byte("AT\r\n"), nil).
-					WithReadResult([]byte("OK\r\n"), nil),
+				deviceEmu: func(writes <-chan WriteRequest, reads <-chan ReadRequest) error {
+					wreq := <-writes // AT
+					wreq.Response <- WriteResponse{}
+
+					rreq := <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("AT\r\n")}
+
+					rreq = <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("OK\r\n")}
+
+					return nil
+				},
 			},
-			testSequence: []inputWithExpectedOutput{
+			testSequence: []writeAndScanParams{
 				{
 					input:     "AT\r\n",
 					wantState: ATEcho,
@@ -78,56 +298,53 @@ func TestScanWriter_Sequences(t *testing.T) {
 			},
 		},
 		{
-			name: "can write new command before previous has finished",
+			name: "cannot write command before previous has finished",
 			fields: fields{
-				device: NewTestReadWriter().
-					WithWriteResult(nil). // AT
-					WithReadResult([]byte("AT\r\n"), nil).
-					WithWriteResult(nil). // ATA
-					WithReadResult([]byte("ATA\r\n"), nil).
-					WithReadResult([]byte("OK\r\n"), nil). // AT OK
-					WithReadResult([]byte("OK\r\n"), nil), // ATA OK
+				deviceEmu: func(writes <-chan WriteRequest, reads <-chan ReadRequest) error {
+					wreq := <-writes // AT
+					wreq.Response <- WriteResponse{}
+
+					rreq := <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("AT\r\n")}
+
+					// attempt to write second command fails before hitting device
+					return nil
+				},
 			},
-			testSequence: []inputWithExpectedOutput{
+			testSequence: []writeAndScanParams{
 				{
 					input:     "AT\r\n",
 					wantState: ATEcho,
 					wantData:  "AT\r\n",
 				},
 				{
-					skipScan:  true,      // don't progress state and data
-					input:     "ATA\r\n", // write a new command
-					wantState: ATEcho,    // confirms data is still active from previous scan
-					wantData:  "AT\r\n",
-				},
-				{
-					wantState: ATData, // classification of the echo fails because we didnt wait for previous command to finish
-					wantData:  "ATA\r\n",
-				},
-				{
-					wantState: ATReady, // AT
-					wantData:  "OK\r\n",
-				},
-				{
-					wantState: ATReady, // ATA
-					wantData:  "OK\r\n",
+					skipScan:       true,      // don't progress state and data
+					input:          "ATA\r\n", // write a new command
+					wantInputError: true,
+					ignoreState:    true,
+					ignoreData:     true,
 				},
 			},
 		},
 		{
 			name: "error in command correctly updates state",
 			fields: fields{
-				device: NewTestReadWriter().
-					WithWriteResult(nil),
+				deviceEmu: func(writes <-chan WriteRequest, reads <-chan ReadRequest) error {
+					wreq := <-writes                 // AT#VT
+					wreq.Response <- WriteResponse{} // signal write as OK
+
+					rreq := <-reads // Test proceeds to Scan which triggers a Read
+					rreq.Response <- ReadResponse{OutData: []byte("AT#VT\r\n")}
+
+					rreq = <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("ERROR: COMMAND NOT SUPPORT\r\n")}
+
+					return nil
+				},
 			},
-			testSequence: []inputWithExpectedOutput{
+			testSequence: []writeAndScanParams{
 				{
-					input: "AT#VT\r\n",
-					output: [][]byte{
-						[]byte("AT#VT\r\n"),
-						[]byte("ERROR: COMMAND NOT SUPPORT\r\n"),
-						[]byte("\r\n"),
-					},
+					input:     "AT#VT\r\n",
 					wantState: ATEcho,
 					wantData:  "AT#VT\r\n",
 				},
@@ -138,22 +355,28 @@ func TestScanWriter_Sequences(t *testing.T) {
 				},
 			},
 		},
-
 		{
 			name: "device read errors propagate",
 			fields: fields{
-				device: NewTestReadWriter().
-					WithWriteResult(nil),
+				deviceEmu: func(writes <-chan WriteRequest, reads <-chan ReadRequest) error {
+					wreq := <-writes // AT
+					wreq.Response <- WriteResponse{}
+
+					rreq := <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("A")}
+					rreq = <-reads
+					rreq.Response <- ReadResponse{Err: fmt.Errorf("fake device error")}
+					rreq = <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("T\r\n")}
+					rreq = <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("OK\r\n")}
+
+					return nil
+				},
 			},
-			testSequence: []inputWithExpectedOutput{
+			testSequence: []writeAndScanParams{
 				{
-					input: "AT\r\n",
-					output: [][]byte{
-						[]byte("A"),
-						nil,
-						[]byte("T\r\n"),
-						[]byte("OK\r\n"),
-					},
+					input:           "AT\r\n",
 					ignoreState:     true,
 					ignoreData:      true,
 					wantScanFailure: true,
@@ -169,20 +392,25 @@ func TestScanWriter_Sequences(t *testing.T) {
 				},
 			},
 		},
-
 		{
 			name: "test AT error condition",
 			fields: fields{
-				device: NewTestReadWriter().
-					WithWriteResult(nil),
+				deviceEmu: func(writes <-chan WriteRequest, reads <-chan ReadRequest) error {
+					wreq := <-writes // AT+CNUM
+					wreq.Response <- WriteResponse{}
+
+					rreq := <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("AT+CNUM\r\n")}
+
+					rreq = <-reads // simulates the weird behaviour exhibited by the K3520
+					rreq.Response <- ReadResponse{OutData: []byte(`+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n")}
+
+					return nil
+				},
 			},
-			testSequence: []inputWithExpectedOutput{
+			testSequence: []writeAndScanParams{
 				{
-					input: "AT+CNUM\r\n",
-					output: [][]byte{
-						[]byte("AT+CNUM\r\n"),
-						[]byte(`+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n"),
-					},
+					input:           "AT+CNUM\r\n",
 					ignoreState:     false,
 					ignoreData:      true,
 					wantScanFailure: false,
@@ -200,16 +428,31 @@ func TestScanWriter_Sequences(t *testing.T) {
 		{
 			name: "test that Bytes always returns the raw bytes read",
 			fields: fields{
-				device: NewTestReadWriter().
-					WithWriteResult(nil),
+				deviceEmu: func(writes <-chan WriteRequest, reads <-chan ReadRequest) error {
+					wreq := <-writes // AT+CNUM
+					wreq.Response <- WriteResponse{}
+
+					rreq := <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("AT+CNUM\r\n")}
+
+					rreq = <-reads // simulates the weird behaviour exhibited by the K3520
+					rreq.Response <- ReadResponse{OutData: []byte(`+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n")}
+
+					wreq = <-writes                  // AT
+					wreq.Response <- WriteResponse{} // signal write as OK
+
+					rreq = <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("AT\r\n")}
+
+					rreq = <-reads
+					rreq.Response <- ReadResponse{OutData: []byte("OK\r\n")}
+
+					return nil
+				},
 			},
-			testSequence: []inputWithExpectedOutput{
+			testSequence: []writeAndScanParams{
 				{
-					input: "AT+CNUM\r\n",
-					output: [][]byte{
-						[]byte("AT+CNUM\r\n"),
-						[]byte(`+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n"),
-					},
+					input:           "AT+CNUM\r\n",
 					ignoreState:     false,
 					ignoreData:      true,
 					wantScanFailure: false,
@@ -223,11 +466,7 @@ func TestScanWriter_Sequences(t *testing.T) {
 					wantData:  `+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n",
 				},
 				{
-					input: "AT\r\n",
-					output: [][]byte{
-						[]byte("AT\r\n"),
-						[]byte(`OK` + "\r\n"),
-					},
+					input:           "AT\r\n",
 					ignoreState:     false,
 					ignoreData:      true,
 					wantScanFailure: false,
@@ -238,99 +477,75 @@ func TestScanWriter_Sequences(t *testing.T) {
 				{
 					wantError: false,
 					wantState: ATReady,
-					wantData:  `OK` + "\r\n",
+					wantData:  "OK\r\n",
 				},
 			},
 		},
-
-		// Need to add a test profile to run this
-		// {
-		// 	name: "test device with inconsistent EOLs on Echoes",
-		// 	fields: fields{
-		// 		device: NewTestReadWriter().
-		// 			WithWriteResult(nil),
-		// 	},
-		// 	testSequence: []inputWithExpectedOutput{
-		// 		{
-		// 			input: "AT+CNUM\r\n",
-		// 			output: [][]byte{
-		// 				[]byte("AT+CNUM\r\r\n"),
-		// 				[]byte(`+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n"),
-		// 				[]byte(`AT` + "\r\n"),
-		// 				[]byte(`OK` + "\r\n"),
-		// 			},
-		// 			ignoreState:     false,
-		// 			ignoreData:      true,
-		// 			wantScanFailure: false,
-		// 			wantError:       false,
-		// 			wantState:       ATEcho,
-		// 		},
-		// 		{
-		// 			wantError:  true,
-		// 			wantState:  ATError,
-		// 			wantData:   `+CME ERROR: invalid characters in text string+CNUM: "","+46123456789",145` + "\r\n",
-		// 			ignoreData: false,
-		// 		},
-		// 	},
-		// },
 	}
 	for i := range tests {
 		tt := tests[i]
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+			device, deviceErrChan := NewFakeDeviceReadWriter(tt.fields.deviceEmu)
+			sw := newScanWriter(device, tt.fields.deviceProfile, false)
+			sw.unblockThreshold = tt.fields.unblockThreshold
+			sw.state.current = tt.fields.current
+			sw.state.err = tt.fields.err
+			sw.state.cmd = tt.fields.cmd
+			sw.state.outputCount = tt.fields.outputCount
+			sw.state.cmdActive = tt.fields.cmdActive
 
-			sw := NewScanWriter(tt.fields.device, tt.fields.deviceProfile)
-
-			sw.current = tt.fields.current
-			sw.err = tt.fields.err
-			sw.cmd = tt.fields.cmd
-			sw.outputCount = tt.fields.outputCount
-			sw.cmdActive = tt.fields.cmdActive
-
-			for i, ts := range tt.testSequence {
-
-				ctx := context.TODO()
-				if ts.ctx != nil {
-					ctx = ts.ctx
-				}
-
-				if ts.input != "" {
-					if err := sw.Write([]byte(ts.input)); !ts.wantInputError && err != nil {
-						t.Errorf("Part %d: ScanWriter.Write() = %v, wantInputError %v", i, err, ts.wantInputError)
-					}
-				}
-
-				for _, buf := range ts.output {
-					dev := tt.fields.device.(*TestReadWriter)
-					if buf == nil {
-						dev.WithReadResult(nil, fmt.Errorf("nil output buffer in test"))
-						continue
-					}
-					dev.WithReadResult(buf, nil)
-				}
-
-				if !ts.skipScan {
-					if scanOk := sw.Scan(ctx); scanOk == ts.wantScanFailure {
-						t.Errorf("Part %d: ScanWriter.Scan() = %v, want %v", i, scanOk, !ts.wantScanFailure)
-					}
-				}
-				if string(sw.Bytes()) != sw.String() {
-					panic("Bytes() and String() not in sync")
-				}
-
-				if gotState := sw.State(); !ts.ignoreState && gotState != ts.wantState {
-					t.Errorf("Part %d: ScanWriter.State() = %v, want %v", i, gotState, ts.wantState)
-				}
-
-				if gotString := sw.String(); !ts.ignoreData && gotString != ts.wantData {
-					t.Errorf("Part %d: ScanWriter.Bytes() = %v, want %v", i, gotString, ts.wantData)
-				}
-
-				if gotError := sw.Err(); (!ts.wantError && gotError != nil) || (ts.wantError && gotError == nil) {
-					t.Errorf("Part %d: ScanWriter.Err() = %v, wantError %v", i, gotError, ts.wantError)
-				}
-
+			if sw.unblockThreshold == 0 {
+				sw.unblockThreshold = time.Millisecond
 			}
+
+			func() {
+				defer device.Close()
+				for i, ts := range tt.testSequence {
+
+					if ts.input != "" {
+						if err := sw.Write([]byte(ts.input)); !ts.wantInputError && err != nil {
+							t.Errorf("Part %d: ScanWriter.Write() = %v, wantInputError %v", i, err, ts.wantInputError)
+							return
+						}
+					}
+
+					ctx := context.TODO()
+					if ts.ctxFactory != nil {
+						ctx = ts.ctxFactory()
+					}
+
+					if !ts.skipScan {
+						if scanOk := sw.Scan(ctx); scanOk == ts.wantScanFailure {
+							t.Errorf("Part %d: ScanWriter.Scan() = %v, want %v", i, scanOk, !ts.wantScanFailure)
+							return
+						}
+					}
+					if string(sw.Bytes()) != sw.String() {
+						panic("Bytes() and String() not in sync")
+					}
+
+					if gotState := sw.State(); !ts.ignoreState && gotState != ts.wantState {
+						t.Errorf("Part %d: ScanWriter.State() = %v, want %v", i, gotState, ts.wantState)
+						return
+					}
+
+					if gotString := sw.String(); !ts.ignoreData && gotString != ts.wantData {
+						t.Errorf("Part %d: ScanWriter.Bytes() = %v, want %v", i, gotString, ts.wantData)
+						return
+					}
+
+					if gotError := sw.Err(); (!ts.wantError && gotError != nil) || (ts.wantError && gotError == nil) {
+						t.Errorf("Part %d: ScanWriter.Err() = %v, wantError %v", i, gotError, ts.wantError)
+						return
+					}
+				}
+				device.Close()
+				deviceErr := <-deviceErrChan
+				if deviceErr != nil {
+					t.Errorf("Device Emulator error = %v", deviceErr)
+					return
+				}
+			}()
 
 		})
 	}

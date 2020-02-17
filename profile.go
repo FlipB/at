@@ -19,6 +19,9 @@ func (p DefaultProfile) InferState(readData []byte, lastCmd []byte, outputCountC
 		return ATReady, nil
 	case bytes.Equal(readData, append([]byte("OK"), p.EOLSequence()...)):
 		return ATReady, nil
+	case bytes.Equal(readData, append([]byte("BUSY"), p.EOLSequence()...)):
+		// BUSY is returned on ATD calls. Doesn't seem right to call it an error, so.
+		return ATReady, nil
 	case bytes.HasPrefix(readData, []byte("+CME ERROR:")), bytes.HasPrefix(readData, []byte("+CMS ERROR:")),
 		bytes.HasPrefix(readData, []byte("ERROR")), bytes.HasPrefix(readData, []byte("COMMAND NOT SUPPORT")),
 		bytes.HasPrefix(readData, append([]byte("TOO MANY PARAMETERS"), p.EOLSequence()...)), bytes.HasPrefix(readData, append([]byte("NO CARRIER"))):

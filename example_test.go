@@ -10,18 +10,30 @@ import (
 )
 
 func openATDevice() io.ReadWriter {
-	fakeDevice := at.NewTestReadWriter()
-
-	// dont return error when we write to the fake device
-	fakeDevice.WithWriteResult(nil)
-
-	// dont return errors, return these strings when we read from the device
-	// first read
-	fakeDevice.WithReadResult([]byte("AT\r\n"), nil)
-	// second read
-	fakeDevice.WithReadResult([]byte("OK\r\n"), nil)
-	// second third
-	fakeDevice.WithReadResult([]byte("ATE0\r\n"), nil)
+	fakeDevice, _ := at.NewFakeDeviceReadWriter(func(writes <-chan at.WriteRequest, reads <-chan at.ReadRequest) error {
+		lastWrite := ""
+		for {
+			select {
+			case wreq, ok := <-writes:
+				if !ok {
+					return nil
+				}
+				lastWrite = string(wreq.InData)
+				wreq.Response <- at.WriteResponse{} // responding with empty WriteResponse means Write was accepted by the fake device
+			case rreq, ok := <-reads:
+				if !ok {
+					return nil
+				}
+				// Always return OK when someone is reading from device, except if something was just written, then return what was just written
+				data := "OK\r\n"
+				if lastWrite != "" {
+					data = lastWrite
+					lastWrite = ""
+				}
+				rreq.Response <- at.ReadResponse{OutData: []byte(data)}
+			}
+		}
+	})
 
 	return fakeDevice
 }
@@ -63,7 +75,7 @@ func ExampleNewAT() {
 	// so, again, response is empty for AT commands that don't output anything (other than potential command echo and OK)
 }
 
-func ExampleNewScanwriter() {
+func ExampleNewScanWriter() {
 	ctx := context.Background()
 
 	var rawDevice io.ReadWriter = openATDevice()
