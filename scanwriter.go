@@ -177,9 +177,9 @@ func makeSplitter(buf []byte, eolSeq, promptSeq []byte, hooks DeviceHooks, debug
 	}
 }
 
-// Bytes returns the data read from device during the previous call to Next, unless an error ocurred.
+// Bytes returns the data read from device during the previous call to Scan, unless an error ocurred.
 // Requires a call to Scan before calling Bytes.
-// Returned byte slice is strictly read-only.
+// Returned byte slice is strictly read-only and only valid until the next call to Scan.
 func (d *ScanWriter) Bytes() []byte {
 	// data/token/line received
 	d.state.Lock()
@@ -187,7 +187,8 @@ func (d *ScanWriter) Bytes() []byte {
 	return d.state.current
 }
 
-// String returns the data read from device during the previous call to Next as a string, unless an error occurred.
+// String returns the data read from device during the previous call to Scan as a string, unless an error occurred.
+// Output is only valid until the next call to Scan.
 func (d *ScanWriter) String() string {
 	// data/token/line received
 	d.state.Lock()
@@ -195,7 +196,8 @@ func (d *ScanWriter) String() string {
 	return string(d.state.current)
 }
 
-// Err returns the error that occured during the call to Next or nil if no error occured
+// Err returns the error that occured during the call to Scan or nil if no error occured.
+// Output is only valid until the next call to Scan.
 func (d *ScanWriter) Err() error {
 	d.state.Lock()
 	defer d.state.Unlock()
@@ -207,6 +209,7 @@ func (d *ScanWriter) Err() error {
 }
 
 // State returns the classification of the read output after a call to Next.
+// Output is only valid until the next call to Scan.
 func (d *ScanWriter) State() State {
 	// at prompt or not
 	d.state.Lock()
